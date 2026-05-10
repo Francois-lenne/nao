@@ -25,7 +25,8 @@ export const useStoryViewerAgentState = (
 
 	const isAgentRunningFromContext =
 		messages === undefined && (agent?.status === 'streaming' || agent?.status === 'submitted');
-	const isStoryStreamingRelevant = messages === undefined ? isStoryStreaming : isStoryStreaming && isChatAgentRunning;
+	const isStoryStreamingRelevant =
+		isStoryStreaming && (messages === undefined ? isAgentRunningFromContext : isChatAgentRunning);
 	const isAgentRunning = isAgentRunningFromContext || isStoryStreamingRelevant;
 
 	return {
@@ -50,7 +51,7 @@ function isLatestRelevantStoryPartStreaming(messages: UIMessage[], storySlug: st
 				continue;
 			}
 
-			return part.state === 'input-streaming';
+			return part.state === 'input-streaming' && messages[m]?.stopReason !== 'interrupted';
 		}
 	}
 
