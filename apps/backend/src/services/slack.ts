@@ -59,6 +59,7 @@ type SlackBotWebhooks = NonNullable<Chat['webhooks']>;
 type SlackPostMessageOptions = {
 	chatId?: string;
 	subscribeThread?: boolean;
+	threadId?: string;
 };
 type SlackPostMessageResult = {
 	channel: string;
@@ -149,11 +150,12 @@ class ProjectSlackBot {
 		await this.stopSocketMode();
 	}
 
-	public async postMessage(channelId: string, text: string): Promise<SlackPostMessageResult> {
+	public async postMessage(channelId: string, text: string, threadTs?: string): Promise<SlackPostMessageResult> {
 		const resolvedText = await this._resolveSlackUserMentions(text);
 		const result = await this._slackClient.chat.postMessage({
 			channel: channelId,
 			text: formatSlackMessageText(resolvedText),
+			thread_ts: threadTs,
 		});
 
 		if (!result.ok) {
@@ -163,7 +165,7 @@ class ProjectSlackBot {
 			throw new Error('Slack did not return a channel and timestamp for the posted message.');
 		}
 
-		const threadId = getSlackThreadId(result.channel, result.ts);
+		const threadId = getSlackThreadId(result.channel, threadTs ?? result.ts);
 		return { channel: result.channel, ts: result.ts, threadId };
 	}
 
@@ -870,12 +872,16 @@ class SlackService {
 		}
 
 		const bot = await this._getOrCreateBot(config);
-		const result = await bot.postMessage(channelId, text);
-		if (options.chatId) {
-			await chatQueries.attachSlackThread(options.chatId, result.threadId);
-		}
-		if (options.subscribeThread ?? !!options.chatId) {
-			await bot.subscribeThread(result.threadId);
+		const threadTs = options.threadId ? parseSlackThreadTs(options.threadId) : undefined;
+		const result = await bot.postMessage(channelId, text, threadTs);
+
+		if (!threadTs) {
+			if (options.chatId) {
+				await chatQueries.attachSlackThread(options.chatId, result.threadId);
+			}
+			if (options.subscribeThread ?? !!options.chatId) {
+				await bot.subscribeThread(result.threadId);
+			}
 		}
 		return result;
 	}
@@ -982,6 +988,11 @@ class SlackService {
 
 function getSlackThreadId(channelId: string, threadTs: string): string {
 	return `slack:${channelId}:${threadTs}`;
+}
+
+function parseSlackThreadTs(threadId: string): string | undefined {
+	const [, , threadTs] = threadId.split(':');
+	return threadTs || undefined;
 }
 
 function extractSlackUserMentionHandles(text: string): string[] {
