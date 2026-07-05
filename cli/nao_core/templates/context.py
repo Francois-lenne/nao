@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from nao_core.commands.sync.providers.obsidian.provider import OBSIDIAN_OUTPUT_DIR
 
 if TYPE_CHECKING:
     from jinja2 import Environment
@@ -388,7 +389,7 @@ class ObsidianProvider:
     """Provider interface for accessing synced Obsidian notes in templates."""
 
     def __init__(self, project_path: Path):
-        self._snapshot_root = project_path / "docs" / "obsidian"
+        self._snapshot_root = project_path / OBSIDIAN_OUTPUT_DIR
         self._note_cache: dict[str, ObsidianNote] = {}
 
     def note(self, relative_path: str) -> ObsidianNote:

@@ -10,6 +10,7 @@ from ..base import SyncProvider, SyncResult
 console = Console()
 
 IGNORED_DIR_NAMES = {".obsidian"}
+OBSIDIAN_OUTPUT_DIR = "docs/obsidian"
 
 
 def cleanup_stale_notes(synced_files: set[str], output_path: Path, verbose: bool = False) -> int:
@@ -59,7 +60,7 @@ class ObsidianSyncProvider(SyncProvider):
 
     @property
     def default_output_dir(self) -> str:
-        return "docs/obsidian"
+        return OBSIDIAN_OUTPUT_DIR
 
     def get_items(self, config: NaoConfig) -> list[ObsidianConfig]:
         return [config.obsidian] if config.obsidian else []
