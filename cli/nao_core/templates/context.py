@@ -450,7 +450,14 @@ class NaoContext:
         Example:
             {{ nao.obsidian.note('Projects/roadmap.md').content }}
         """
-        return ObsidianProvider(self._project_path)
+        project_path = self._project_path
+        if project_path is None:
+            raise RuntimeError(
+                "Obsidian note reading requires a project path. "
+                "This context was created without a project_path — "
+                "ensure nao sync is run from a valid nao project directory."
+            )
+        return ObsidianProvider(project_path)
 
     @property
     def config(self) -> NaoConfig:
