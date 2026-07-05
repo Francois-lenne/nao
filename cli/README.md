@@ -39,6 +39,8 @@ pip install 'nao-core[ollama]'
 pip install 'nao-core[notion]'
 ```
 
+Obsidian support is included in the core package and does not require an extra.
+
 Combine multiple extras in a single install:
 
 ```bash
