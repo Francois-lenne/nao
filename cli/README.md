@@ -90,6 +90,7 @@ This will create a new nao project in the current directory. It will prompt you 
 - **`ai_summary` template + model** (prompted only when you enable `ai_summary` for databases)
 - **Slack integration**
 - **Notion integration**
+- **Obsidian integration**
 
 The resulting project structure looks like:
 
@@ -166,6 +167,7 @@ Syncs configured resources to local files:
 - **Databases** - generates markdown docs (`columns.md`, `preview.md`, `description.md`) for each table into `databases/`
 - **Git repositories** — clones or pulls repos into `repos/`
 - **Notion pages** — exports pages as markdown into `docs/notion/`
+- **Obsidian notes** — copies markdown notes from a local vault into `docs/obsidian/`
 
 After syncing, any Jinja templates (`*.j2` files) in the project directory are rendered with the nao context.
 

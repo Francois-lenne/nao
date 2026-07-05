@@ -39,6 +39,7 @@ from nao_core.config.databases.redshift import RedshiftSSHTunnelConfig  # noqa: 
 from nao_core.config.llm import DEFAULT_ANNOTATION_MODELS, LLMConfig, LLMProvider  # noqa: E402
 from nao_core.config.mcp import McpConfig  # noqa: E402
 from nao_core.config.notion import NotionConfig  # noqa: E402
+from nao_core.config.obsidian import ObsidianConfig  # noqa: E402
 from nao_core.config.repos.base import RepoConfig  # noqa: E402
 from nao_core.config.skills import SkillsConfig  # noqa: E402
 from nao_core.config.slack import SlackConfig  # noqa: E402
@@ -237,6 +238,14 @@ def _section_notion() -> str:
     return "\n".join(parts)
 
 
+def _section_obsidian() -> str:
+    parts: list[str] = []
+    parts.append("## Obsidian\n")
+    parts.append(_fields_table(ObsidianConfig))
+    parts.append("")
+    return "\n".join(parts)
+
+
 def _section_slack() -> str:
     parts: list[str] = []
     parts.append("## Slack\n")
@@ -305,6 +314,9 @@ notion:
   pages:
     - https://notion.so/my-page-id
 
+obsidian:
+  path: /Users/me/Documents/Knowledge
+
 slack:
   bot_token: ${{ env('SLACK_BOT_TOKEN') }}
   signing_secret: ${{ env('SLACK_SIGNING_SECRET') }}
@@ -341,6 +353,7 @@ def generate_markdown() -> str:
                 "databases": "[DatabaseConfig[]](#databases)",
                 "repos": "[RepoConfig[]](#repos)",
                 "notion": "[NotionConfig](#notion)",
+                "obsidian": "[ObsidianConfig](#obsidian)",
                 "llm": "[LLMConfig](#llm)",
                 "slack": "[SlackConfig](#slack)",
                 "mcp": "[McpConfig](#mcp)",
@@ -354,6 +367,7 @@ def generate_markdown() -> str:
     parts.append(_section_llm())
     parts.append(_section_repos())
     parts.append(_section_notion())
+    parts.append(_section_obsidian())
     parts.append(_section_slack())
     parts.append(_section_mcp())
     parts.append(_section_skills())
