@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from nao_core.commands.sync.providers.obsidian.provider import OBSIDIAN_OUTPUT_DIR
+from nao_core.obsidian import OBSIDIAN_OUTPUT_DIR
 
 if TYPE_CHECKING:
     from jinja2 import Environment

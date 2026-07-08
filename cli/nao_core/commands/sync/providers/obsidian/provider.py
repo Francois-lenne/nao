@@ -4,13 +4,13 @@ from rich.console import Console
 
 from nao_core.config.base import NaoConfig
 from nao_core.config.obsidian import ObsidianConfig
+from nao_core.obsidian import OBSIDIAN_OUTPUT_DIR
 
 from ..base import SyncProvider, SyncResult
 
 console = Console()
 
 IGNORED_DIR_NAMES = {".obsidian"}
-OBSIDIAN_OUTPUT_DIR = "docs/obsidian"
 
 
 def cleanup_stale_notes(synced_files: set[str], output_path: Path, verbose: bool = False) -> int:
