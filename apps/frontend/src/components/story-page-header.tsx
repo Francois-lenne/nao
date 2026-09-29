@@ -2,24 +2,23 @@ import {
 	Activity,
 	ChevronLeft,
 	ChevronRight,
+	CircleAlert,
 	Code,
 	Ellipsis,
 	Eye,
-	Globe,
+	Info,
 	Loader2,
 	MessageSquare,
 	Pencil,
 	RefreshCw,
 	RotateCcw,
 	Save,
-	ScanText,
-	Star,
-	Upload,
 } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
 
 import type { StoryViewMode } from '@/components/side-panel/story-viewer.types';
-import { StoryDownload } from '@/components/story-download';
+import { EditableStoryTitle } from '@/components/editable-story-title';
+import { StoryDownloadMenu, canDownloadStory } from '@/components/story-download';
+import { ShareButton, StoryFavoriteMenuItem, StoryFavoritedButton } from '@/components/story-header-actions';
 import { Button } from '@/components/ui/button';
 import {
 	DropdownMenu,
@@ -27,18 +26,30 @@ import {
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Switch } from '@/components/ui/switch';
+import { SwitchIndicator } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { useToggleFavorite } from '@/hooks/use-toggle-favorite';
+import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts';
+import { useTimeAgo } from '@/hooks/use-time-ago';
+import { getShortcutLabel } from '@/lib/keyboard-shortcuts';
 import { cn } from '@/lib/utils';
-import { trpc } from '@/main';
 
 interface LiveControls {
 	isLive: boolean;
+	cachedAt?: string | Date | null;
+	lastRefreshFailure?: StoryRefreshFailure | null;
 	isRefreshing?: boolean;
+	canRefresh?: boolean;
+	isUpdating?: boolean;
 	onRefresh?: () => void;
-	/** When provided, the live state can be toggled (owner). Otherwise the badge is read-only. */
+	/** When provided, clicking the badge opens settings. Otherwise the badge is read-only. */
 	onOpenSettings?: () => void;
+	/** Overrides the tooltip shown on the clickable badge (e.g. for viewers managing notifications). */
+	isDialogNotifManager?: boolean;
+}
+
+export interface StoryRefreshFailure {
+	errorMessage: string;
+	failedAt: string | Date;
 }
 
 interface DownloadConfig {
@@ -58,6 +69,8 @@ interface ViewModeControls {
 	isCodeDirty?: boolean;
 	isCodeValid?: boolean;
 	onSave?: () => void;
+	onCancel?: () => void;
+	isSaving?: boolean;
 }
 
 interface VersionControls {
@@ -78,6 +91,7 @@ export interface StoryPageHeaderProps {
 	live?: LiveControls;
 	download?: DownloadConfig;
 	storyId?: string | null;
+	canRename?: boolean;
 	isShared?: boolean;
 	onShare?: () => void;
 	onOpenAnalytics?: () => void;
@@ -94,16 +108,30 @@ export function StoryPageHeader({
 	live,
 	download,
 	storyId,
+	canRename = false,
 	isShared = false,
 	onShare,
 	onOpenAnalytics,
 	viewModeControls,
 	versionControls,
 }: StoryPageHeaderProps) {
+	useKeyboardShortcuts({
+		'toggle-story-chat': onOpenChat && !isOpeningChat ? onOpenChat : undefined,
+	});
+
+	const showActionsMenu = (download && canDownloadStory(download)) || !!storyId || !!onOpenAnalytics;
+
 	return (
 		<div className='shrink-0'>
 			<header className='flex items-center gap-2 border-b bg-background px-4 py-2.5 md:px-6'>
-				<h1 className='min-w-0 truncate text-base font-medium'>{title}</h1>
+				<EditableStoryTitle
+					storyId={storyId}
+					title={title}
+					canEdit={canRename}
+					heading='h1'
+					className='min-w-0 max-w-full truncate text-base font-medium'
+					inputClassName='text-base font-medium'
+				/>
 				{authorName && <span className='shrink-0 text-sm text-muted-foreground'>by {authorName}</span>}
 
 				{versionControls && <VersionNav controls={versionControls} />}
@@ -112,65 +140,68 @@ export function StoryPageHeader({
 					{viewModeControls && <ViewModeToggle controls={viewModeControls} />}
 
 					{onOpenChat && (
-						<Button
-							variant='outline'
-							size='sm'
-							className='gap-1.5 rounded-full text-xs'
-							onClick={onOpenChat}
-							disabled={isOpeningChat}
-						>
-							{isOpeningChat ? (
-								<Loader2 className='size-3.5 animate-spin' strokeWidth={2.25} />
-							) : (
-								<MessageSquare className='size-3.5' strokeWidth={2.25} />
-							)}
-							<span>{openChatLabel}</span>
-						</Button>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									variant='outline'
+									size='sm'
+									className='gap-1.5 rounded-full text-xs'
+									onClick={onOpenChat}
+									disabled={isOpeningChat}
+								>
+									{isOpeningChat ? (
+										<Loader2 className='size-3.5 animate-spin' strokeWidth={2.25} />
+									) : (
+										<MessageSquare className='size-3.5' strokeWidth={2.25} />
+									)}
+									<span>{openChatLabel}</span>
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent>
+								<span className='flex items-center gap-2'>
+									{openChatLabel}
+									<kbd className='text-[10px] opacity-60 font-sans'>
+										{getShortcutLabel('toggle-story-chat')}
+									</kbd>
+								</span>
+							</TooltipContent>
+						</Tooltip>
 					)}
 
 					{live && <LiveStoryControls live={live} />}
 
-					<div>
-						{download && <StoryDownload iconOnly {...download} />}
+					{storyId && <StoryFavoritedButton storyId={storyId} />}
 
-						{storyId && <FavoriteButton storyId={storyId} />}
+					{onShare && <ShareButton isShared={isShared} onShare={onShare} />}
 
-						{(onShare || onOpenAnalytics) && (
-							<DropdownMenu>
-								<DropdownMenuTrigger asChild>
-									<Button
-										variant='ghost'
-										size='icon-sm'
-										className='hover:rounded-full'
-										aria-label='More actions'
-									>
-										<Ellipsis className='size-3.5' strokeWidth={2.25} />
-									</Button>
-								</DropdownMenuTrigger>
-								<DropdownMenuContent align='end' className='w-auto min-w-20'>
-									{onShare && (
-										<DropdownMenuItem onSelect={onShare}>
-											{isShared ? (
-												<Globe className='text-primary' strokeWidth={2.25} />
-											) : (
-												<Upload strokeWidth={2.25} />
-											)}
-											<span>Share</span>
-										</DropdownMenuItem>
-									)}
-									{onOpenAnalytics && (
-										<DropdownMenuItem onSelect={onOpenAnalytics}>
-											<ScanText className='size-3' />
-											<span>Analytics</span>
-										</DropdownMenuItem>
-									)}
-								</DropdownMenuContent>
-							</DropdownMenu>
-						)}
-					</div>
+					{showActionsMenu && (
+						<DropdownMenu>
+							<DropdownMenuTrigger asChild>
+								<Button
+									variant='ghost'
+									size='icon-sm'
+									className='hover:rounded-full'
+									aria-label='More actions'
+								>
+									<Ellipsis className='size-3.5' strokeWidth={2.25} />
+								</Button>
+							</DropdownMenuTrigger>
+							<DropdownMenuContent align='end' className='w-auto min-w-20'>
+								{download && <StoryDownloadMenu {...download} />}
+								{storyId && <StoryFavoriteMenuItem storyId={storyId} />}
+								{onOpenAnalytics && (
+									<DropdownMenuItem onSelect={onOpenAnalytics}>
+										<Info strokeWidth={2.25} />
+										<span>Analytics</span>
+									</DropdownMenuItem>
+								)}
+							</DropdownMenuContent>
+						</DropdownMenu>
+					)}
 				</div>
 			</header>
 
+			{live?.lastRefreshFailure && <StoryRefreshFailureBanner failure={live.lastRefreshFailure} />}
 			<StorySubHeader viewModeControls={viewModeControls} versionControls={versionControls} />
 		</div>
 	);
@@ -211,7 +242,7 @@ function VersionNav({ controls }: { controls: VersionControls }) {
 }
 
 function ViewModeToggle({ controls }: { controls: ViewModeControls }) {
-	const { viewMode, onViewModeChange, canEdit = false, isAgentRunning = false } = controls;
+	const { viewMode, onViewModeChange, canEdit = false, isAgentRunning = false, isSaving = false } = controls;
 
 	return (
 		<div className='flex items-center gap-1.5 rounded-full border p-0.5'>
@@ -220,6 +251,7 @@ function ViewModeToggle({ controls }: { controls: ViewModeControls }) {
 				size='icon-xs'
 				className={cn(viewMode === 'preview' && 'bg-accent rounded-full', 'hover:rounded-full')}
 				onClick={() => onViewModeChange('preview')}
+				disabled={isSaving}
 				aria-label='Preview'
 			>
 				<Eye className='size-3' strokeWidth={2.25} />
@@ -230,7 +262,7 @@ function ViewModeToggle({ controls }: { controls: ViewModeControls }) {
 					size='icon-xs'
 					className={cn(viewMode === 'edit' && 'bg-accent rounded-full', 'hover:rounded-full')}
 					onClick={() => onViewModeChange('edit')}
-					disabled={isAgentRunning}
+					disabled={isAgentRunning || isSaving}
 					aria-label='Edit'
 				>
 					<Pencil className='size-3' strokeWidth={2.25} />
@@ -241,6 +273,7 @@ function ViewModeToggle({ controls }: { controls: ViewModeControls }) {
 				size='icon-xs'
 				className={cn(viewMode === 'code' && 'bg-accent rounded-full', 'hover:rounded-full')}
 				onClick={() => onViewModeChange('code')}
+				disabled={isSaving}
 				aria-label='Code'
 			>
 				<Code className='size-3' strokeWidth={2.25} />
@@ -261,7 +294,7 @@ function StorySubHeader({
 	const isEditing = viewMode === 'edit' || (viewMode === 'code' && isCodeDirty);
 
 	if (viewModeControls && isEditing) {
-		const { onViewModeChange, isCodeValid = true, onSave } = viewModeControls;
+		const { onViewModeChange, onCancel, isCodeValid = true, onSave, isSaving = false } = viewModeControls;
 		const isEditingCode = viewMode === 'code' && isCodeDirty;
 		return (
 			<div className='flex items-center justify-between border-b bg-muted/40 px-4 py-2 md:px-6'>
@@ -269,14 +302,20 @@ function StorySubHeader({
 					{viewMode === 'edit' ? 'Editing' : isCodeValid ? 'Editing code' : 'Fix validation errors to save'}
 				</span>
 				<div className='flex items-center gap-2'>
-					<Button variant='outline' size='sm' onClick={() => onViewModeChange('preview')}>
+					<Button
+						variant='outline'
+						size='sm'
+						onClick={onCancel ?? (() => onViewModeChange('preview'))}
+						disabled={isSaving}
+					>
 						Cancel
 					</Button>
 					<Button
 						variant='primary-gradient'
 						size='sm'
 						onClick={onSave}
-						disabled={isEditingCode && !isCodeValid}
+						disabled={isSaving || (isEditingCode && !isCodeValid)}
+						isLoading={isSaving}
 						className='gap-1.5'
 					>
 						<Save className='size-3' strokeWidth={2.25} />
@@ -306,7 +345,16 @@ function StorySubHeader({
 }
 
 function LiveStoryControls({ live }: { live: LiveControls }) {
-	const { isLive, isRefreshing = false, onRefresh, onOpenSettings } = live;
+	const {
+		isLive,
+		cachedAt,
+		isRefreshing = false,
+		canRefresh = Boolean(live.onRefresh),
+		isUpdating = false,
+		onRefresh,
+		onOpenSettings,
+		isDialogNotifManager,
+	} = live;
 
 	if (!onOpenSettings) {
 		if (!isLive) {
@@ -319,29 +367,55 @@ function LiveStoryControls({ live }: { live: LiveControls }) {
 						<div className='flex items-center gap-2 border rounded-full px-2 py-0.75'>
 							<Activity className='size-3.5 text-foreground' strokeWidth={2.25} />
 							<span className='text-xs font-medium'>Live story</span>
-							<Switch checked={isLive} onCheckedChange={() => {}} disabled />
+							<SwitchIndicator checked={isLive} />
 						</div>
 					</TooltipTrigger>
 					<TooltipContent>Live story</TooltipContent>
 				</Tooltip>
-				{onRefresh && <RefreshButton isRefreshing={isRefreshing} onRefresh={onRefresh} />}
+				{cachedAt && <LiveStoryTimestamp cachedAt={cachedAt} />}
+				{canRefresh && onRefresh && <RefreshButton isRefreshing={isRefreshing} onRefresh={onRefresh} />}
 			</>
 		);
 	}
 
 	return (
 		<>
-			{isLive && onRefresh && <RefreshButton isRefreshing={isRefreshing} onRefresh={onRefresh} />}
 			<Tooltip>
 				<TooltipTrigger asChild>
-					<div className='flex items-center gap-2 border rounded-full px-2 py-0.75'>
-						<Activity className='size-3.5 text-foreground' strokeWidth={2.25} />
-						<span className='text-xs font-medium'>Live story</span>
-						<Switch checked={isLive} onCheckedChange={onOpenSettings} />
-					</div>
+					<span className='inline-flex' tabIndex={isUpdating ? 0 : undefined}>
+						<button
+							type='button'
+							onClick={onOpenSettings}
+							disabled={isUpdating}
+							className={cn(
+								'flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 border hover:bg-secondary rounded-full px-2 py-0.75',
+								isUpdating && 'pointer-events-none',
+							)}
+						>
+							<>
+								<Activity className='size-3.5 text-foreground' strokeWidth={2.25} />
+								<span className='text-xs font-medium'>Live story</span>
+								{isUpdating ? (
+									<Loader2 className='size-3.5 animate-spin' strokeWidth={2.25} />
+								) : (
+									<SwitchIndicator checked={isLive} />
+								)}
+							</>
+						</button>
+					</span>
 				</TooltipTrigger>
-				<TooltipContent>{isLive ? 'Live story settings' : 'Enable live mode'}</TooltipContent>
+				<TooltipContent>
+					{isDialogNotifManager
+						? 'Manage notifications'
+						: isLive
+							? isUpdating
+								? 'Updating...'
+								: 'Live story settings'
+							: 'Enable live mode'}
+				</TooltipContent>
 			</Tooltip>
+			{isLive && cachedAt && <LiveStoryTimestamp cachedAt={cachedAt} />}
+			{isLive && canRefresh && onRefresh && <RefreshButton isRefreshing={isRefreshing} onRefresh={onRefresh} />}
 		</>
 	);
 }
@@ -370,29 +444,39 @@ function RefreshButton({ isRefreshing, onRefresh }: { isRefreshing: boolean; onR
 	);
 }
 
-function FavoriteButton({ storyId }: { storyId: string }) {
-	const { toggle: toggleFavorite, isPending } = useToggleFavorite('story');
-	const { data: favorites } = useQuery(trpc.favorite.list.queryOptions());
-	const isFavorited = favorites?.storyIds.includes(storyId) ?? false;
+export function LiveStoryTimestamp({ cachedAt }: { cachedAt: string | Date }) {
+	const timestampMs = new Date(cachedAt).getTime();
+	const timeAgo = useTimeAgo(timestampMs);
 
 	return (
 		<Tooltip>
 			<TooltipTrigger asChild>
-				<Button
-					variant='ghost'
-					size='icon-sm'
-					className='hover:rounded-full'
-					onClick={() => toggleFavorite(storyId)}
-					disabled={isPending}
-					aria-label={isFavorited ? 'Remove from favorites' : 'Add to favorites'}
-				>
-					<Star
-						className={cn('size-3.5', isFavorited && 'fill-foreground text-foreground')}
-						strokeWidth={2.25}
-					/>
-				</Button>
+				<div className='flex items-center rounded-full py-0.75 text-xs text-muted-foreground -mr-1'>
+					<span>{timeAgo.humanReadable.toLowerCase()}</span>
+				</div>
 			</TooltipTrigger>
-			<TooltipContent>{isFavorited ? 'Remove from favorites' : 'Add to favorites'}</TooltipContent>
+			<TooltipContent>Updated {new Date(cachedAt).toLocaleString()}</TooltipContent>
 		</Tooltip>
+	);
+}
+
+export function StoryRefreshFailureBanner({ failure }: { failure: StoryRefreshFailure }) {
+	const failedAt = new Date(failure.failedAt);
+	const timeAgo = useTimeAgo(failedAt.getTime());
+
+	return (
+		<div
+			role='alert'
+			className='flex items-start gap-2 border-b bg-destructive/10 px-4 py-2 text-xs text-destructive md:px-6'
+		>
+			<CircleAlert className='mt-0.5 size-3.5 shrink-0' />
+			<div className='min-w-0'>
+				<span className='font-medium'>Story refresh failed.</span>{' '}
+				<span className='break-words'>{failure.errorMessage}</span>
+				<span className='ml-1 opacity-70' title={failedAt.toLocaleString()}>
+					{timeAgo.humanReadable}
+				</span>
+			</div>
+		</div>
 	);
 }

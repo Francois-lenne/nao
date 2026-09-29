@@ -123,7 +123,8 @@ async function finishAutomationRun(automation: AutomationWithSchedule, run: DBAu
 				: undefined,
 			{
 				excludeFollowUps: true,
-				tools: ({ chat: agentChat, agentSettings, webTools }) =>
+				supportsCustomCharts: false,
+				tools: ({ chat: agentChat, agentSettings, toolContext, webTools }) =>
 					getTools(
 						agentSettings,
 						{
@@ -142,6 +143,7 @@ async function finishAutomationRun(automation: AutomationWithSchedule, run: DBAu
 							mcpEnabled: automation.mcpEnabled,
 							mcpServers: automation.mcpServers,
 							excludeFollowUps: true,
+							semanticLayerMode: toolContext.semanticLayerMode,
 						},
 					),
 			},

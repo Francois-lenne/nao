@@ -1,12 +1,26 @@
+import { parseChartAttributes, resolveGridWidths, storyBlockRegex } from '@nao/shared/story-segments';
+import { parseStoryTabs } from '@nao/shared/story-tabs';
 import type { StorySummary, SummarySegment } from '@nao/shared/types';
 
 export function extractStorySummary(code: string): StorySummary {
-	return { segments: extractSegments(code) };
+	const tabs = parseStoryTabs(code);
+	if (!tabs?.length) {
+		return { segments: extractSegments(code) };
+	}
+	const segments: SummarySegment[] = [];
+	for (const tab of tabs) {
+		const title = truncateText(tab.title);
+		if (title) {
+			segments.push({ type: 'text', content: title });
+		}
+		segments.push(...extractSegments(tab.innerCode));
+	}
+	return { segments };
 }
 
 function extractSegments(code: string): SummarySegment[] {
 	const segments: SummarySegment[] = [];
-	const blockRegex = /<grid\s+([^>]*)>([\s\S]*?)<\/grid>|<chart\s+([^/>]*)\/?>|<table\s+([^/>]*)\/?>/g;
+	const blockRegex = storyBlockRegex();
 	let match;
 	let lastIndex = 0;
 
@@ -18,13 +32,14 @@ function extractSegments(code: string): SummarySegment[] {
 			}
 		}
 
-		if (match[1] !== undefined && match[2] !== undefined) {
-			const attrs = parseAttributes(match[1]);
-			const cols = parseInt(attrs.cols || '2', 10);
+		if (match[2] !== undefined) {
+			const attrs = parseChartAttributes(match[1] ?? '');
 			const children = extractSegments(match[2]);
-			segments.push({ type: 'grid', cols, children });
+			const cols = parseInt(attrs.cols || String(children.length || 1), 10);
+			const widths = resolveGridWidths(attrs.widths, children.length);
+			segments.push({ type: 'grid', cols, widths, children });
 		} else if (match[3] !== undefined) {
-			const attrs = parseAttributes(match[3]);
+			const attrs = parseChartAttributes(match[3]);
 			if (attrs.chart_type) {
 				segments.push({
 					type: 'chart',
@@ -34,9 +49,16 @@ function extractSegments(code: string): SummarySegment[] {
 				});
 			}
 		} else if (match[4] !== undefined) {
-			const attrs = parseAttributes(match[4]);
+			const attrs = parseChartAttributes(match[4]);
 			segments.push({
 				type: 'table',
+				title: attrs.title || '',
+			});
+		} else if (match[6] !== undefined) {
+			const attrs = parseChartAttributes(match[6]);
+			segments.push({
+				type: 'map',
+				mapType: attrs.map_type || 'points',
 				title: attrs.title || '',
 			});
 		}
@@ -83,14 +105,4 @@ function truncateText(raw: string): string {
 	});
 
 	return truncated.join('\n');
-}
-
-function parseAttributes(attrString: string): Record<string, string> {
-	const attrs: Record<string, string> = {};
-	const regex = /(\w+)=(?:"([^"]*)"|'([^']*)')/g;
-	let match;
-	while ((match = regex.exec(attrString)) !== null) {
-		attrs[match[1]] = match[2] ?? match[3];
-	}
-	return attrs;
 }

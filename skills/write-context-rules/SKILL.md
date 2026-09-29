@@ -18,7 +18,7 @@ Anything else (per-table schema, full metric semantics, domain-specific rules) b
 
 | Location                                        | What's in it                                                                                                                                                                                               | Implication for `RULES.md`                                                                                                                                            |
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `databases/type=*/database=*/schema=*/table=*/` | Per-table files synced from the warehouse: `columns.md`, `description.md`, `preview.md`, and (if enabled in `nao_config.yaml` `templates:`) `how_to_use.md`, `ai_summary.md`, `profiling.md`               | If rich per-table docs exist here, **don't restate columns** in `RULES.md` — point to the folder.                                                                     |
+| `databases/type=*/database=*/schema=*/table=*/` | Per-table files synced from the warehouse when enabled in `nao_config.yaml` `templates:`: `columns.md`, `preview.md`, `profiling.md`, `query_history.md`, `ai_summary.md`                                  | If rich per-table docs exist here, **don't restate columns** in `RULES.md` — point to the folder.                                                                     |
 | `repos/<name>/`                                 | Synced git repos (dbt, ETL, BI). A dbt repo has `models/**/schema.yml` (or `*.yml`) column docs, `*.md` model docs, and possibly a **semantic layer / MetricFlow** file (`semantic_models:` + `metrics:`). | Map the key files in the Context Map. If dbt schema docs cover columns, point there. If a semantic layer exists, **don't write a Key Metrics section** — route to it. |
 | `docs/`                                         | Free-text business docs (Notion exports, CRM definitions, analytics decisions).                                                                                                                            | Note they exist, what's in each, and when to read them. If a doc defines a metric/segment, point to it instead of redefining.                                         |
 | `semantics/`                                    | nao YAML semantic layer (from `add-semantic-layer`).                                                                                                                                                       | Same as a dbt semantic layer — route metrics to it, don't redefine.                                                                                                   |
@@ -33,6 +33,7 @@ Anything else (per-table schema, full metric semantics, domain-specific rules) b
 5. `## Key Metrics Reference` — **only if no semantic layer / metric docs exist elsewhere** (see Step 5). Otherwise a one-line routing pointer to it.
 6. `## Date filtering` — three example formulas (last X weeks / last X days / current month). Don't enumerate every period.
 7. `## Analysis Process` — adaptive: read semantic layer → read docs → select table → check `profiling.md` before filtering values → query → validate → context.
+8. `## Chart & Visualization Guidelines` — **only if the project produces charts/stories and the company has a brand palette.** The brand color palette for chart series + semantic good/bad colors, sourced from the company's design system / brand guidelines. Keeps every chart on-brand and consistent.
 
 ## Flow
 
@@ -44,7 +45,7 @@ Anything else (per-table schema, full metric semantics, domain-specific rules) b
 
 Before writing anything, survey the repo so the rest of the flow knows what to point to vs. what to write:
 
-- `nao_config.yaml` — which `templates:` are synced per database (do `how_to_use` / `ai_summary` / `profiling` exist?), which `repos:` are wired.
+- `nao_config.yaml` — which `templates:` are synced per database (do `columns` / `preview` / `profiling` / `query_history` / `ai_summary` exist?), which `repos:` are wired.
 - `databases/` — list tables and check how rich the per-table files are.
 - `repos/<name>/` — for each repo, find: column docs (`**/schema.yml`, `**/*.yml` with `models:`), model/domain docs (`*.md`), and a **semantic layer** (grep for `semantic_models:` / `metrics:` / MetricFlow). Note the paths.
 - `docs/` — list files and skim what each covers.
@@ -64,7 +65,7 @@ From `databases/` and `repos/<dbt>/`: Warehouse type/project/dataset, Data stack
 
 The orchestrator's index of where context lives. Built from Step 0. Cover:
 
-- **Per-table context** — what each table folder under `databases/` contains (e.g. `columns.md`, `how_to_use.md`, `ai_summary.md`, `profiling.md`) and one line on what each is for.
+- **Per-table context** — what each table folder under `databases/` contains (`columns.md`, `preview.md`, `profiling.md`, `query_history.md`, `ai_summary.md`) and one line on what each is for.
 - **Repos** — per repo, the key files and what they hold:
     ```
     - `repos/dbt/` — dbt project. Column docs: `models/silver.yml`. Domain decisions: `models/silver/*_ANALYTICS_DECISIONS.md`. Semantic layer (metrics): `models/silver_semantic_layer.yml`.
@@ -83,7 +84,7 @@ The orchestrator's index of where context lives. Built from Step 0. Cover:
 - `dim_users` — user dimension. See `databases/.../table=dim_users/`.
 ```
 
-**`### Tables detail`** — **conditional.** Only write per-table blocks (Purpose / Granularity / Key Columns ≤10 / Use For) **when no richer table documentation exists elsewhere** (no `how_to_use.md`/`ai_summary.md` per table, no dbt `schema.yml` column docs). If those exist, **do not restate columns** — the Most Used pointer + Context map already route there. Reserve `### Tables detail` for the few cross-table nuances/pitfalls not captured anywhere else (e.g. "weekly table has no `n_active_users` column").
+**`### Tables detail`** — **conditional.** Only write per-table blocks (Purpose / Granularity / Key Columns ≤10 / Use For) **when no richer table documentation exists elsewhere** (no `query_history.md`/`ai_summary.md` per table, no dbt `schema.yml` column docs). If those exist, **do not restate columns** — the Most Used pointer + Context map already route there. Reserve `### Tables detail` for the few cross-table nuances/pitfalls not captured anywhere else (e.g. "weekly table has no `n_active_users` column").
 
 ### Step 5 — `## Key Metrics Reference`
 
@@ -144,6 +145,17 @@ WHERE date >= DATE_TRUNC(CURRENT_DATE - INTERVAL (X * 7) DAY, ISOWEEK)
   AND date <  DATE_TRUNC(CURRENT_DATE, ISOWEEK)
 ```
 
+### Step 10 — `## Chart & Visualization Guidelines`
+
+When the agent produces charts or stories, give it a fixed palette so output stays on-brand instead of using the charting library's defaults.
+
+Ask the user for (or point to) their **design system / brand guidelines**:
+
+1. **Brand series colors** — the ordered palette used for chart series (primary first, then ~5 more shades/variants). Fill the palette table with the exact hex values.
+2. **Semantic colors** — the fixed good/bad colors (e.g. green for positive, orange/red for negative), used only when a chart encodes good-vs-bad.
+
+Keep the two rules from the template: single-series → primary; multi-series → spread across the palette, then tints/shades beyond ~6; brand colors for neutral categorical series, semantic colors only for good/bad. If the user has no brand palette, don't add section in the rules.
+
 ## Audit-and-fill flow (when `RULES.md` is not empty)
 
 1. Run Step 0 (inventory) first — then read the existing `RULES.md`.
@@ -162,6 +174,7 @@ For deeper diagnostics (MECE, schema drift, test failure root causes), route to 
 - **`### Tables detail` only if no richer table docs exist elsewhere.**
 - **`## Key Metrics Reference` only if no semantic layer / metric docs exist elsewhere.** Otherwise route.
 - **Don't invent metric sources.** Unclear → list for user validation in Step 8.
+- **`## Chart & Visualization Guidelines` only if the project renders charts/stories and the user has a real brand palette** — use their exact hex values, never invent them; if there's no brand palette, omit the section entirely.
 - **Always check `profiling.md` before filtering on a column value** — bake this into the Analysis Process.
 - **`## Date filtering` keeps three examples max.**
 

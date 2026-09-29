@@ -5,7 +5,7 @@ import type {
 	GroupedChatListResponse,
 	LlmProvider,
 } from '@nao/shared/types';
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, like, ne, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, like, ne, notInArray, or, sql } from 'drizzle-orm';
 
 import s, {
 	DBChat,
@@ -29,6 +29,7 @@ import {
 import { applyChatFilters, buildChatGroups, type EnrichedChat, type SourcePlatform } from '../utils/chat-list';
 import { convertDBPartToUIPart, mapUIPartsToDBParts } from '../utils/chat-message-part-mappings';
 import { getErrorMessage } from '../utils/utils';
+import * as executeSqlQueries from './execute-sql.queries';
 
 const chatCreatedAtMs =
 	dbConfig.dialect === Dialect.Postgres
@@ -47,6 +48,7 @@ const sourcePlatformExpr = sql<SourcePlatform>`case
 	when ${s.chat.teamsThreadId} is not null then 'Teams'
 	when ${s.chat.whatsappThreadId} is not null then 'WhatsApp'
 	when ${s.chat.telegramThreadId} is not null then 'Telegram'
+	when ${s.chat.mattermostThreadId} is not null then 'Mattermost'
 	when exists(
 		select 1 from ${s.chatMessage}
 		where ${s.chatMessage.chatId} = ${s.chat.id}
@@ -71,7 +73,7 @@ export const listGroupedChats = async (
 	filters: ChatFilterType[],
 ): Promise<GroupedChatListResponse> => {
 	const effective = filters.length === 0 || filters.includes('all') ? (['all'] as ChatFilterType[]) : filters;
-	const needsShared = effective.includes('all') || effective.includes('shared_with_me') || groupBy === 'ownership';
+	const needsShared = effective.includes('shared_with_me') || groupBy === 'ownership';
 
 	const [ownItems, sharedItems] = await Promise.all([
 		listOwnChats(userId),
@@ -294,6 +296,81 @@ export const getChatMessages = async (chatId: string): Promise<UIMessage[]> => {
 	return aggregateChatMessagParts(result);
 };
 
+export const deleteLastEmptyTurn = async (
+	chatId: string,
+): Promise<{ outcome: 'deleted' | 'kept'; chatDeleted: boolean }> => {
+	return db.transaction(async (t) => {
+		const activeMessages = await t
+			.select({
+				id: s.chatMessage.id,
+				role: s.chatMessage.role,
+				versionGroupId: s.chatMessage.versionGroupId,
+			})
+			.from(s.chatMessage)
+			.where(and(eq(s.chatMessage.chatId, chatId), isNull(s.chatMessage.supersededAt)))
+			.orderBy(desc(s.chatMessage.createdAt))
+			.execute();
+		const latestMessage = activeMessages.at(0);
+		if (!latestMessage || latestMessage.role === 'system') {
+			return { outcome: 'kept', chatDeleted: false };
+		}
+
+		const userMessage =
+			latestMessage.role === 'user' ? latestMessage : activeMessages.find((message) => message.role === 'user');
+		if (!userMessage) {
+			return { outcome: 'kept', chatDeleted: false };
+		}
+
+		if (latestMessage.role === 'assistant') {
+			const [semanticContentPart] = await t
+				.select({ id: s.messagePart.id })
+				.from(s.messagePart)
+				.where(
+					and(
+						eq(s.messagePart.messageId, latestMessage.id),
+						notInArray(s.messagePart.type, ['step-start', 'reasoning', 'tool-suggest_follow_ups']),
+					),
+				)
+				.limit(1)
+				.execute();
+			if (semanticContentPart) {
+				return { outcome: 'kept', chatDeleted: false };
+			}
+		}
+
+		if (userMessage.versionGroupId) {
+			const [versionGroup] = await t
+				.select({ value: count() })
+				.from(s.chatMessage)
+				.where(
+					and(eq(s.chatMessage.chatId, chatId), eq(s.chatMessage.versionGroupId, userMessage.versionGroupId)),
+				)
+				.execute();
+			if ((versionGroup?.value ?? 0) > 1) {
+				return { outcome: 'kept', chatDeleted: false };
+			}
+		}
+
+		const messageIds = [userMessage.id, ...(latestMessage.role === 'assistant' ? [latestMessage.id] : [])];
+		await t
+			.delete(s.chatMessage)
+			.where(and(eq(s.chatMessage.chatId, chatId), inArray(s.chatMessage.id, messageIds)))
+			.execute();
+
+		const [remaining] = await t
+			.select({ value: count() })
+			.from(s.chatMessage)
+			.where(and(eq(s.chatMessage.chatId, chatId), isNull(s.chatMessage.supersededAt)))
+			.execute();
+		if ((remaining?.value ?? 0) > 0) {
+			return { outcome: 'deleted', chatDeleted: false };
+		}
+
+		await t.delete(s.chat).where(eq(s.chat.id, chatId)).execute();
+		return { outcome: 'deleted', chatDeleted: true };
+	});
+};
+
 export const getChatOwnerId = async (chatId: string): Promise<string | undefined> => {
 	const [result] = await db
 		.select({
@@ -433,6 +510,7 @@ export const createChat = async (
 			.values({
 				id: messageId,
 				chatId: savedChat.id,
+				senderUserId: savedChat.userId,
 				role: 'user',
 				source: newUserMessage.source,
 				citation: newUserMessage.citation ?? null,
@@ -498,6 +576,7 @@ export const upsertMessage = async (
 	message: Omit<UIMessage, 'id'> & {
 		id?: string;
 		chatId: string;
+		senderUserId?: string;
 		stopReason?: StopReason;
 		error?: unknown;
 		tokenUsage?: TokenUsage;
@@ -512,6 +591,7 @@ export const upsertMessage = async (
 		const messageValues = {
 			id: messageId,
 			chatId: message.chatId,
+			senderUserId: message.senderUserId,
 			role: message.role,
 			stopReason: message.stopReason,
 			errorMessage: getErrorMessage(message.error),
@@ -651,6 +731,19 @@ export const getLastAssistantMessageId = async (chatId: string): Promise<string 
 	return result?.id ?? null;
 };
 
+export const isAssistantMessageInProject = async (messageId: string, projectId: string): Promise<boolean> => {
+	const [result] = await db
+		.select({ id: s.chatMessage.id })
+		.from(s.chatMessage)
+		.innerJoin(s.chat, eq(s.chatMessage.chatId, s.chat.id))
+		.where(
+			and(eq(s.chatMessage.id, messageId), eq(s.chatMessage.role, 'assistant'), eq(s.chat.projectId, projectId)),
+		)
+		.limit(1)
+		.execute();
+	return Boolean(result);
+};
+
 export const getChatBySlackThread = async (threadId: string): Promise<{ id: string; title: string } | null> => {
 	const result = await db
 		.select({ id: s.chat.id, title: s.chat.title })
@@ -685,6 +778,20 @@ export const getChatByTelegramThread = async (threadId: string): Promise<{ id: s
 	return result.at(0) || null;
 };
 
+export const getChatByMattermostThread = async (threadId: string): Promise<{ id: string; title: string } | null> => {
+	const result = await db
+		.select({ id: s.chat.id, title: s.chat.title })
+		.from(s.chat)
+		.where(eq(s.chat.mattermostThreadId, threadId))
+		.limit(1)
+		.execute();
+	return result.at(0) || null;
+};
+
+export const attachMattermostThread = async (chatId: string, mattermostThreadId: string): Promise<void> => {
+	await db.update(s.chat).set({ mattermostThreadId }).where(eq(s.chat.id, chatId)).execute();
+};
+
 export const getChatByWhatsappThread = async (threadId: string): Promise<{ id: string; title: string } | null> => {
 	const result = await db
 		.select({ id: s.chat.id, title: s.chat.title })
@@ -703,6 +810,17 @@ export const clearWhatsappThread = async (threadId: string): Promise<boolean> =>
 		.returning({ id: s.chat.id })
 		.execute();
 	return result.length > 0;
+};
+
+/** Clears the slack thread mapping for the main conversation of a DM, identified by the raw Slack channel ID (e.g. `D123ABC`). The main conversation is the chat with an empty thread timestamp (`slack:<channelId>:`); explicitly opened threads are left untouched. Returns the affected chat IDs so running agents can be stopped. */
+export const clearSlackMainThread = async (slackChannelId: string): Promise<string[]> => {
+	const result = await db
+		.update(s.chat)
+		.set({ slackThreadId: null })
+		.where(eq(s.chat.slackThreadId, `slack:${slackChannelId}:`))
+		.returning({ id: s.chat.id })
+		.execute();
+	return result.map((r) => r.id);
 };
 
 export type SearchChatResult = {
@@ -852,21 +970,35 @@ export const getChatProjectId = async (chatId: string): Promise<string | undefin
 	return result?.projectId;
 };
 
-export const getProjectIdByQueryId = async (queryId: string): Promise<string | undefined> => {
-	const jsonIdFilter =
-		dbConfig.dialect === Dialect.Postgres
-			? sql`${s.messagePart.toolOutput}->>'id' = ${queryId}`
-			: sql`json_extract(${s.messagePart.toolOutput}, '$.id') = ${queryId}`;
-
+export const getLatestAssistantModel = async (
+	chatId: string,
+): Promise<{ provider: LlmProvider; modelId: string } | null> => {
 	const [result] = await db
-		.select({ projectId: s.chat.projectId })
-		.from(s.messagePart)
-		.innerJoin(s.chatMessage, eq(s.messagePart.messageId, s.chatMessage.id))
-		.innerJoin(s.chat, eq(s.chatMessage.chatId, s.chat.id))
-		.where(jsonIdFilter)
+		.select({ provider: s.chatMessage.llmProvider, modelId: s.chatMessage.llmModelId })
+		.from(s.chatMessage)
+		.where(
+			and(
+				eq(s.chatMessage.chatId, chatId),
+				eq(s.chatMessage.role, 'assistant'),
+				isNull(s.chatMessage.supersededAt),
+				isNotNull(s.chatMessage.llmProvider),
+				isNotNull(s.chatMessage.llmModelId),
+			),
+		)
+		.orderBy(desc(s.chatMessage.createdAt))
+		.limit(1)
 		.execute();
 
-	return result?.projectId;
+	if (!result?.provider || !result?.modelId) {
+		return null;
+	}
+
+	return { provider: result.provider, modelId: result.modelId };
+};
+
+export const getProjectIdByQueryId = async (queryId: string): Promise<string | undefined> => {
+	const owner = await executeSqlQueries.getExecuteSqlOwnerByQueryId(queryId);
+	return owner?.projectId;
 };
 
 /**
@@ -878,24 +1010,8 @@ export const getQueryResultByQueryId = async (
 	chatId: string,
 	queryId: string,
 ): Promise<{ columns: string[]; data: Record<string, unknown>[] } | null> => {
-	const jsonIdFilter = buildQueryIdJsonFilter(queryId);
-
-	const [result] = await db
-		.select({ toolOutput: s.messagePart.toolOutput })
-		.from(s.messagePart)
-		.innerJoin(s.chatMessage, eq(s.messagePart.messageId, s.chatMessage.id))
-		.where(
-			and(
-				eq(s.chatMessage.chatId, chatId),
-				isNull(s.chatMessage.supersededAt),
-				eq(s.messagePart.toolName, 'execute_sql'),
-				jsonIdFilter,
-			),
-		)
-		.limit(1)
-		.execute();
-
-	return extractQueryResultFromToolOutput(result?.toolOutput);
+	const part = await executeSqlQueries.getExecuteSqlPartByQueryIdInChat(chatId, queryId);
+	return part ? extractQueryResultFromToolOutput(part.toolOutput) : null;
 };
 
 export const getQueryResultByQueryIdInProject = async (
@@ -903,8 +1019,6 @@ export const getQueryResultByQueryIdInProject = async (
 	userId: string,
 	queryId: string,
 ): Promise<{ columns: string[]; data: Record<string, unknown>[]; chatId: string } | null> => {
-	const jsonIdFilter = buildQueryIdJsonFilter(queryId);
-
 	const [result] = await db
 		.select({ toolOutput: s.messagePart.toolOutput, chatId: s.chat.id })
 		.from(s.messagePart)
@@ -915,10 +1029,11 @@ export const getQueryResultByQueryIdInProject = async (
 				eq(s.chat.projectId, projectId),
 				eq(s.chat.userId, userId),
 				isNull(s.chatMessage.supersededAt),
-				eq(s.messagePart.toolName, 'execute_sql'),
-				jsonIdFilter,
+				executeSqlQueries.isQueryToolPart(),
+				executeSqlQueries.messagePartToolOutputIdEquals(queryId),
 			),
 		)
+		.orderBy(desc(s.chatMessage.createdAt), desc(s.messagePart.order))
 		.limit(1)
 		.execute();
 
@@ -928,12 +1043,6 @@ export const getQueryResultByQueryIdInProject = async (
 	}
 	return { ...extracted, chatId: result.chatId };
 };
-
-function buildQueryIdJsonFilter(queryId: string) {
-	return dbConfig.dialect === Dialect.Postgres
-		? sql`${s.messagePart.toolOutput}->>'id' = ${queryId}`
-		: sql`json_extract(${s.messagePart.toolOutput}, '$.id') = ${queryId}`;
-}
 
 function extractQueryResultFromToolOutput(
 	toolOutput: unknown,

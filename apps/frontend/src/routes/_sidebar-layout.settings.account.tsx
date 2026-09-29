@@ -1,6 +1,5 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Github } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import type { UserRole } from '@nao/shared/types';
 
@@ -16,11 +15,11 @@ import { useLocalStorage } from '@/hooks/use-local-storage';
 import { soundNotificationStorage } from '@/hooks/use-stream-end-sound';
 import { useToolCallDensity } from '@/hooks/use-tool-call-density';
 import { ThemeSelector } from '@/components/settings/theme-selector';
-import { ToolCallDensitySlider } from '@/components/settings/tool-call-density-slider';
+import { ToolCallDensitySetting } from '@/components/settings/tool-call-density-setting';
 import { DangerZone } from '@/components/settings/danger-zone';
+import { SettingsMemories } from '@/components/settings/memories';
 import { SettingsCard, SettingsPageWrapper } from '@/components/ui/settings-card';
 import { SettingsControlRow, SettingsToggleRow } from '@/components/ui/settings-toggle-row';
-import { Button } from '@/components/ui/button';
 import { trpc } from '@/main';
 
 export const Route = createFileRoute('/_sidebar-layout/settings/account')({
@@ -34,19 +33,13 @@ function GeneralPage() {
 	const queryClient = useQueryClient();
 	const { isAdmin, isViewer, role } = usePermissions();
 	const [soundEnabled, setSoundEnabled] = useLocalStorage(soundNotificationStorage);
-	const [toolCallDensity, setToolCallDensity] = useToolCallDensity();
+	const [toolCallDensity, setToolCallDensity, toolCallDensityState] = useToolCallDensity();
 
 	const navigation = useAuthRoute();
 
 	const [editOpen, setEditOpen] = useState(false);
 
 	const modifyUser = useMutation(trpc.user.modify.mutationOptions());
-	const githubAvailable = useQuery(trpc.github.isAvailable.queryOptions());
-	const githubStatus = useQuery({
-		...trpc.github.getStatus.queryOptions(),
-		enabled: githubAvailable.data === true,
-	});
-	const disconnectGithub = useMutation(trpc.github.disconnect.mutationOptions());
 
 	const editMember: TeamMember | null =
 		user && editOpen
@@ -55,6 +48,7 @@ function GeneralPage() {
 					name: user.name,
 					email: user.email,
 					role: role ?? 'user',
+					status: 'active',
 				}
 			: null;
 
@@ -78,95 +72,61 @@ function GeneralPage() {
 		});
 	};
 
-	const handleDisconnectGithub = async () => {
-		await disconnectGithub.mutateAsync();
-		await githubStatus.refetch();
-	};
-
 	return (
 		<SettingsPageWrapper>
-			<UserProfileCard
-				name={user?.name}
-				email={user?.email}
-				onEdit={() => setEditOpen(true)}
-				onSignOut={handleSignOut}
-			/>
+			<div className='flex flex-col gap-5'>
+				<div>
+					<h1 className='text-lg font-semibold text-foreground'>Account</h1>
+					<p className='text-sm text-muted-foreground'>Manage your account and session.</p>
+				</div>
+				<div className='flex flex-col gap-12'>
+					<UserProfileCard
+						name={user?.name}
+						email={user?.email}
+						onEdit={() => setEditOpen(true)}
+						onSignOut={handleSignOut}
+					/>
 
-			<EditMemberDialog
-				open={editOpen}
-				onOpenChange={setEditOpen}
-				member={editMember}
-				isAdmin={isAdmin}
-				onSubmit={handleEdit}
-			/>
+					<EditMemberDialog
+						open={editOpen}
+						onOpenChange={setEditOpen}
+						member={editMember}
+						isAdmin={isAdmin}
+						roleScope='project'
+						onSubmit={handleEdit}
+					/>
 
-			<SettingsCard title='General Settings' divide>
-				<SettingsToggleRow
-					id='sound-notification'
-					label='Sound notification'
-					description='Play a sound when the agent finishes responding.'
-					checked={soundEnabled}
-					onCheckedChange={setSoundEnabled}
-				/>
-				<SettingsControlRow
-					label='Tool Call Density'
-					description='Adjust how much detail is shown for tool calls.'
-					control={<ToolCallDensitySlider value={toolCallDensity} onValueChange={setToolCallDensity} />}
-				/>
-				<SettingsControlRow label='Theme' description='Choose how nao looks.' control={<ThemeSelector />} />
-				<SettingsControlRow
-					label='Newsletter'
-					description='Get product updates, release notes, and analytics agent tips.'
-					control={<NewsletterSubscribeInlineForm initialEmail={user?.email} />}
-				/>
-			</SettingsCard>
+					<SettingsCard title='General Settings' divide>
+						<SettingsToggleRow
+							id='sound-notification'
+							label='Sound notification'
+							description='Play a sound when the agent finishes responding.'
+							checked={soundEnabled}
+							onCheckedChange={setSoundEnabled}
+						/>
+						<ToolCallDensitySetting
+							value={toolCallDensity}
+							onValueChange={setToolCallDensity}
+							canChange={toolCallDensityState.canChange}
+							isLoading={toolCallDensityState.isLoading}
+						/>
+						<SettingsControlRow
+							label='Theme'
+							description='Choose how nao looks.'
+							control={<ThemeSelector />}
+						/>
+						<SettingsControlRow
+							label='Newsletter'
+							description='Get product updates, release notes, and analytics agent tips.'
+							control={<NewsletterSubscribeInlineForm initialEmail={user?.email} />}
+						/>
+					</SettingsCard>
 
-			{githubAvailable.data === true && (
-				<SettingsCard
-					title='GitHub'
-					description='Connect the GitHub account automations can use for proactive actions.'
-					icon={<Github className='size-4' />}
-				>
-					{githubStatus.data?.connected ? (
-						<div className='flex items-center justify-between gap-4'>
-							<div className='flex items-center gap-3 min-w-0'>
-								{githubStatus.data.user.avatarUrl && (
-									<img
-										src={githubStatus.data.user.avatarUrl}
-										alt=''
-										className='size-8 rounded-full'
-									/>
-								)}
-								<div className='min-w-0'>
-									<div className='text-sm font-medium truncate'>{githubStatus.data.user.login}</div>
-									<div className='text-xs text-muted-foreground'>Connected</div>
-								</div>
-							</div>
-							<Button
-								variant='secondary'
-								size='sm'
-								onClick={handleDisconnectGithub}
-								disabled={disconnectGithub.isPending}
-							>
-								Disconnect
-							</Button>
-						</div>
-					) : (
-						<div className='flex items-center justify-between gap-4'>
-							<p className='text-sm text-muted-foreground'>GitHub is not connected yet.</p>
-							<Button variant='secondary' size='sm' asChild>
-								<a href='/api/github/connect?returnTo=/settings/account'>
-									<Github className='size-3.5' />
-									Connect GitHub
-								</a>
-							</Button>
-						</div>
-					)}
-				</SettingsCard>
-			)}
+					<SettingsMemories isAdmin={isAdmin} />
 
-			{!isViewer && <DangerZone />}
-
+					{!isViewer && <DangerZone />}
+				</div>
+			</div>
 			{isAdmin && <SettingsVersionInfo />}
 		</SettingsPageWrapper>
 	);

@@ -7,6 +7,8 @@ import dbConfig, { Dialect } from '../db/dbConfig';
 
 type FolderMoveTx = DBTransaction;
 
+const writeTransactionConfig = dbConfig.dialect === Dialect.Sqlite ? { behavior: 'immediate' as const } : undefined;
+
 export class MoveFolderCycleError extends Error {
 	constructor() {
 		super('Moving this folder would create a cycle.');
@@ -230,37 +232,46 @@ export async function deleteFolderMovingContentsToParent(folderId: string): Prom
 	await db.delete(s.storyFolder).where(eq(s.storyFolder.id, folderId)).execute();
 }
 
-export async function archiveFolder(folderId: string): Promise<void> {
-	await assertNotSystemFolder(folderId);
-	const folderIds = await listDescendantFolderIds(folderId);
+export async function archiveFolder(folderId: string, executor: DBExecutor = db): Promise<void> {
+	await assertNotSystemFolder(folderId, executor);
+	const folderIds = await listDescendantFolderIds(folderId, executor);
 	const now = new Date();
 
-	await db.update(s.storyFolder).set({ archivedAt: now }).where(inArray(s.storyFolder.id, folderIds)).execute();
+	await executor.update(s.storyFolder).set({ archivedAt: now }).where(inArray(s.storyFolder.id, folderIds)).execute();
 
-	await db.update(s.storyFolder).set({ parentId: null }).where(eq(s.storyFolder.id, folderId)).execute();
+	await executor.update(s.storyFolder).set({ parentId: null }).where(eq(s.storyFolder.id, folderId)).execute();
 
-	const storyIds = await getStoryIdsInFolders(folderIds);
+	const storyIds = await getStoryIdsInFolders(folderIds, executor);
 	if (storyIds.length > 0) {
-		await db.update(s.story).set({ archivedAt: now }).where(inArray(s.story.id, storyIds)).execute();
+		await executor.update(s.story).set({ archivedAt: now }).where(inArray(s.story.id, storyIds)).execute();
 	}
 }
 
-export async function unarchiveFolder(userId: string, projectId: string, folderId: string): Promise<void> {
-	const folderIds = await listDescendantFolderIds(folderId);
+export async function unarchiveFolder(
+	userId: string,
+	projectId: string,
+	folderId: string,
+	executor: DBExecutor = db,
+): Promise<void> {
+	const folderIds = await listDescendantFolderIds(folderId, executor);
 
-	await db.update(s.storyFolder).set({ archivedAt: null }).where(inArray(s.storyFolder.id, folderIds)).execute();
+	await executor
+		.update(s.storyFolder)
+		.set({ archivedAt: null })
+		.where(inArray(s.storyFolder.id, folderIds))
+		.execute();
 
-	const storyIds = await getStoryIdsInFolders(folderIds);
+	const storyIds = await getStoryIdsInFolders(folderIds, executor);
 	if (storyIds.length > 0) {
-		await db.update(s.story).set({ archivedAt: null }).where(inArray(s.story.id, storyIds)).execute();
+		await executor.update(s.story).set({ archivedAt: null }).where(inArray(s.story.id, storyIds)).execute();
 	}
 
-	const folder = await getFolderById(folderId);
+	const folder = await getFolderById(folderId, executor);
 	if (!folder) {
 		return;
 	}
-	const parentId = folder.visibility === 'private' ? await ensurePrivateRoot(userId, projectId) : null;
-	await db.update(s.storyFolder).set({ parentId }).where(eq(s.storyFolder.id, folderId)).execute();
+	const parentId = folder.visibility === 'private' ? await ensurePrivateRoot(userId, projectId, executor) : null;
+	await executor.update(s.storyFolder).set({ parentId }).where(eq(s.storyFolder.id, folderId)).execute();
 }
 
 export async function moveFolder(
@@ -271,57 +282,70 @@ export async function moveFolder(
 ): Promise<void> {
 	await assertNotSystemFolder(id);
 
-	await db.transaction(
-		async (tx) => {
-			await serializeFolderMovesInProject(tx, projectId);
+	await db.transaction(async (tx) => {
+		await serializeFolderMovesInProject(tx, projectId);
 
-			if (newParentId !== null && (await proposedParentChainContains(tx, newParentId, id))) {
-				throw new MoveFolderCycleError();
+		if (newParentId !== null && (await proposedParentChainContains(tx, newParentId, id))) {
+			throw new MoveFolderCycleError();
+		}
+
+		const newVisibility = await resolveFolderVisibility(newParentId, tx);
+		const oldFolder = await getFolderById(id, tx);
+		const oldVisibility = oldFolder?.visibility ?? 'public';
+
+		await tx
+			.update(s.storyFolder)
+			.set({ parentId: newParentId, visibility: newVisibility })
+			.where(eq(s.storyFolder.id, id))
+			.execute();
+
+		if (oldVisibility !== newVisibility) {
+			const descendantIds = await listDescendantFolderIds(id, tx);
+			if (descendantIds.length > 0) {
+				await tx
+					.update(s.storyFolder)
+					.set({ visibility: newVisibility })
+					.where(inArray(s.storyFolder.id, descendantIds))
+					.execute();
 			}
 
-			const newVisibility = await resolveFolderVisibility(newParentId, tx);
-			const oldFolder = await getFolderById(id, tx);
-			const oldVisibility = oldFolder?.visibility ?? 'public';
-
-			await tx
-				.update(s.storyFolder)
-				.set({ parentId: newParentId, visibility: newVisibility })
-				.where(eq(s.storyFolder.id, id))
-				.execute();
-
-			if (oldVisibility !== newVisibility) {
-				const descendantIds = await listDescendantFolderIds(id, tx);
-				if (descendantIds.length > 0) {
-					await tx
-						.update(s.storyFolder)
-						.set({ visibility: newVisibility })
-						.where(inArray(s.storyFolder.id, descendantIds))
-						.execute();
-				}
-
-				const storyIds = await getStoryIdsInFolders([id, ...descendantIds], tx);
-				if (storyIds.length > 0) {
-					await propagateShareChange(storyIds, projectId, userId, newVisibility, tx);
-				}
+			const storyIds = await getStoryIdsInFolders([id, ...descendantIds], tx);
+			if (storyIds.length > 0) {
+				await propagateShareChange(storyIds, projectId, userId, newVisibility, tx);
 			}
-		},
-		{ behavior: 'immediate' },
-	);
+		}
+	}, writeTransactionConfig);
+}
+
+export async function ensureStoryPrivate(
+	storyId: string,
+	options: { storyOwnerId: string; projectId: string },
+): Promise<void> {
+	await db.transaction(async (tx) => {
+		const current = await getStoryFolderItem(storyId, tx);
+		const currentVisibility = await resolveFolderVisibility(current?.folderId ?? null, tx);
+		if (currentVisibility === 'private') {
+			return;
+		}
+		const privateFolderId = await ensurePrivateRoot(options.storyOwnerId, options.projectId, tx);
+		await moveStoryToFolder(storyId, privateFolderId, options, tx);
+	}, writeTransactionConfig);
 }
 
 export async function moveStoryToFolder(
 	storyId: string,
 	folderId: string | null,
 	options: { storyOwnerId: string; projectId: string },
+	executor: DBExecutor = db,
 ): Promise<void> {
-	await db.delete(s.storyFolderItem).where(eq(s.storyFolderItem.storyId, storyId)).execute();
+	await executor.delete(s.storyFolderItem).where(eq(s.storyFolderItem.storyId, storyId)).execute();
 
 	if (folderId) {
-		await db.insert(s.storyFolderItem).values({ storyId, folderId }).execute();
+		await executor.insert(s.storyFolderItem).values({ storyId, folderId }).execute();
 	}
 
-	const newVisibility = await resolveFolderVisibility(folderId);
-	await propagateShareChange([storyId], options.projectId, options.storyOwnerId, newVisibility);
+	const newVisibility = await resolveFolderVisibility(folderId, executor);
+	await propagateShareChange([storyId], options.projectId, options.storyOwnerId, newVisibility, executor);
 }
 
 async function propagateShareChange(
@@ -374,8 +398,11 @@ async function propagateShareChange(
 	}
 }
 
-export async function getStoryFolderItem(storyId: string): Promise<{ folderId: string } | null> {
-	const [row] = await db
+export async function getStoryFolderItem(
+	storyId: string,
+	executor: DBExecutor = db,
+): Promise<{ folderId: string } | null> {
+	const [row] = await executor
 		.select({ folderId: s.storyFolderItem.folderId })
 		.from(s.storyFolderItem)
 		.where(eq(s.storyFolderItem.storyId, storyId))
@@ -412,8 +439,8 @@ async function resolveFolderVisibility(folderId: string | null, executor: DBExec
 	return folder?.visibility ?? 'public';
 }
 
-async function assertNotSystemFolder(folderId: string): Promise<void> {
-	const folder = await getFolderById(folderId);
+async function assertNotSystemFolder(folderId: string, executor: DBExecutor = db): Promise<void> {
+	const folder = await getFolderById(folderId, executor);
 	if (folder?.systemType != null) {
 		throw new SystemFolderError();
 	}

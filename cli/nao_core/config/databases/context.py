@@ -33,6 +33,7 @@ class DatabaseContext:
         self._exclude_columns = list(exclude_columns) if exclude_columns else []
         self._table_ref = None
         self._columns_cache: list[dict[str, Any]] | None = None
+        self._columns_load_failed = False
         self._row_count_cache: int | None = None
 
     def set_exclude_columns(self, patterns: list[str] | None) -> None:
@@ -87,6 +88,18 @@ class DatabaseContext:
                 for name, dtype in schema.items()
             ]
         return self._filter_excluded_columns(self._columns_cache)
+
+    def all_columns(self) -> list[dict[str, Any]] | None:
+        if self._columns_cache is None:
+            self._columns_load_failed = False
+            try:
+                self.columns()
+            except Exception:
+                self._columns_load_failed = True
+                return None
+        if self._columns_load_failed:
+            return None
+        return self._columns_cache if self._columns_cache is not None else []
 
     def row_count(self) -> int:
         if self._row_count_cache is None:
@@ -209,7 +222,7 @@ class DatabaseContext:
         """
         col_sql = self._quote(col["name"])
         col_type = col["type"].lower()
-        table_sql = f"{self._quote(self._schema)}.{self._quote(self._table_name)}"
+        table_sql = self._qualified_table_sql()
         partition_filter = self._partition_filter()
         where_clause = f"WHERE {partition_filter}" if partition_filter else ""
 
@@ -322,6 +335,15 @@ class DatabaseContext:
     def _null_count_sql(self, col_sql: str) -> str:
         return f"COUNT(*) - COUNT({col_sql})"
 
+    def _qualified_table_sql(self) -> str:
+        """Return the schema-qualified, quoted table reference used in raw SQL.
+
+        Overridden by contexts whose ``schema`` carries extra structure the base
+        two-part form can't express (e.g. a catalog-qualified DuckLake schema, or
+        StarRocks' catalog.schema.table).
+        """
+        return f"{self._quote(self._schema)}.{self._quote(self._table_name)}"
+
     # ─── query builders ───────────────────────────────────────────────────────
 
     def _numeric_agg_fragments(self, col_sql: str, col: dict) -> list[tuple[str, str]]:
@@ -341,7 +363,7 @@ class DatabaseContext:
 
     def _build_profiling_query(self, col: dict) -> str:
         col_sql = self._quote(col["name"])
-        table_sql = f"{self._quote(self._schema)}.{self._quote(self._table_name)}"
+        table_sql = self._qualified_table_sql()
 
         partition_filter = self._partition_filter()
         where_clause = f"WHERE {partition_filter}" if partition_filter else ""
@@ -359,7 +381,7 @@ class DatabaseContext:
 
     def _build_top_values_query(self, col: dict) -> str:
         col_sql = self._quote(col["name"])
-        table_sql = f"{self._quote(self._schema)}.{self._quote(self._table_name)}"
+        table_sql = self._qualified_table_sql()
         partition_filter = self._partition_filter()
         where_clause = f"WHERE {partition_filter}" if partition_filter else ""
         return f"""
@@ -459,8 +481,6 @@ class DatabaseContext:
         lowered = normalized.lower()
         if lowered.startswith("string(") and normalized.endswith(")"):
             return "string"
-        if normalized == "int64":
-            return "int32"
         return normalized
 
     @staticmethod

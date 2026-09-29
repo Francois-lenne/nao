@@ -1,4 +1,5 @@
 from .base import NaoConfig, NaoConfigError, resolve_project_path
+from .confluence import ConfluenceConfig
 from .databases import (
     AnyDatabaseConfig,
     BigQueryConfig,
@@ -6,6 +7,7 @@ from .databases import (
     DatabaseType,
     DatabricksConfig,
     DuckDBConfig,
+    MotherDuckConfig,
     MssqlConfig,
     PostgresConfig,
     RedshiftConfig,
@@ -14,9 +16,18 @@ from .databases import (
     TrinoConfig,
 )
 from .exceptions import InitError
-from .llm import PROVIDER_AUTH, LLMConfig, LLMProvider, ProviderAuthConfig
+from .llm import (
+    PROVIDER_AUTH,
+    LLMConfig,
+    LLMProvider,
+    ModelConfig,
+    ModelCosts,
+    ProviderAuthConfig,
+    ProviderConfig,
+)
 from .obsidian import ObsidianConfig
 from .slack import SlackConfig
+from .test import ComparisonConfig, TestConfig
 
 __all__ = [
     "NaoConfig",
@@ -26,6 +37,7 @@ __all__ = [
     "ClickHouseConfig",
     "DuckDBConfig",
     "DatabricksConfig",
+    "MotherDuckConfig",
     "SnowflakeConfig",
     "PostgresConfig",
     "MssqlConfig",
@@ -35,10 +47,16 @@ __all__ = [
     "DatabaseType",
     "LLMConfig",
     "LLMProvider",
+    "ModelConfig",
+    "ModelCosts",
     "PROVIDER_AUTH",
     "ProviderAuthConfig",
+    "ProviderConfig",
     "SlackConfig",
+    "ConfluenceConfig",
     "ObsidianConfig",
+    "ComparisonConfig",
+    "TestConfig",
     "InitError",
     "resolve_project_path",
 ]

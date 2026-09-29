@@ -40,6 +40,55 @@ def test_sync_notes_ignores_obsidian_metadata(tmp_path: Path):
     assert not (tmp_path / "output" / ".obsidian" / "workspace.md").exists()
 
 
+def test_sync_notes_ignores_hidden_folders(tmp_path: Path):
+    vault_path = tmp_path / "vault"
+    (vault_path / ".trash").mkdir(parents=True)
+    (vault_path / ".trash" / "Deleted.md").write_text("# Deleted", encoding="utf-8")
+    (vault_path / "Visible.md").write_text("# Visible", encoding="utf-8")
+
+    result = ObsidianSyncProvider().sync([ObsidianConfig(path=str(vault_path))], tmp_path / "output")
+
+    assert result.items_synced == 1
+    assert not (tmp_path / "output" / ".trash").exists()
+
+
+def test_sync_notes_from_vault_inside_hidden_directory(tmp_path: Path):
+    vault_path = tmp_path / ".vaults" / "Knowledge"
+    vault_path.mkdir(parents=True)
+    (vault_path / "Note.md").write_text("# Note", encoding="utf-8")
+
+    result = ObsidianSyncProvider().sync([ObsidianConfig(path=str(vault_path))], tmp_path / "output")
+
+    assert result.items_synced == 1
+    assert (tmp_path / "output" / "Note.md").exists()
+
+
+def test_sync_notes_copies_non_utf8_content(tmp_path: Path):
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+    (vault_path / "Latin.md").write_bytes("café".encode("latin-1"))
+
+    result = ObsidianSyncProvider().sync([ObsidianConfig(path=str(vault_path))], tmp_path / "output")
+
+    assert result.items_synced == 1
+    assert (tmp_path / "output" / "Latin.md").read_bytes() == "café".encode("latin-1")
+
+
+def test_sync_notes_skips_output_inside_vault(tmp_path: Path):
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+    (vault_path / "Note.md").write_text("# Note", encoding="utf-8")
+    output_path = vault_path / "docs" / "obsidian"
+    provider = ObsidianSyncProvider()
+    config = ObsidianConfig(path=str(vault_path))
+
+    provider.sync([config], output_path)
+    result = provider.sync([config], output_path)
+
+    assert result.items_synced == 1
+    assert not (output_path / "docs").exists()
+
+
 def test_sync_notes_removes_stale_files(tmp_path: Path):
     vault_path = tmp_path / "vault"
     vault_path.mkdir()

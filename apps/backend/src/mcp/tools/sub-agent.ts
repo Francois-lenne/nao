@@ -1,16 +1,18 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { type InferUIMessageChunk, readUIMessageStream } from 'ai';
+import { getToolName, type InferUIMessageChunk, isToolUIPart, readUIMessageStream } from 'ai';
 import { z } from 'zod';
 
+import { MCP_SUB_AGENT_EXCLUDED_TOOLS } from '../../agents/tools';
 import * as chatQueries from '../../queries/chat.queries';
 import * as storyQueries from '../../queries/story.queries';
-import { agentService } from '../../services/agent';
+import { agentService, defaultAgentToolsExcluding } from '../../services/agent';
 import { mcpService } from '../../services/mcp';
 import { skillService } from '../../services/skill';
 import type { UIMessage, UIMessagePart } from '../../types/chat';
+import { CHART_DATA_MODE_ASK_NAO_ADDENDUM, CHART_DATA_MODE_RESULT_NUDGE } from '../chart-data-mode';
 import type { McpContext, ToolResult } from '../logging';
 import { chatUrl } from '../urls';
-import { type AskNaoResult, askNaoRuns } from './ask-nao-runs';
+import { type AskNaoClarification, type AskNaoResult, askNaoRuns } from './ask-nao-runs';
 import { registerMcpTool } from './register-mcp-tool';
 
 type Agent = Awaited<ReturnType<typeof agentService.create>>;
@@ -37,7 +39,20 @@ const ASK_NAO_DESCRIPTION =
 	'LONG RUNS: the agent runs in the background. If it does not finish quickly this returns ' +
 	"`status: 'running'` with a `chatId` instead of the answer. When that happens, call " +
 	'`get_nao_answer` with that `chatId` (polling every few seconds) until it returns ' +
-	"`status: 'complete'`.";
+	"`status: 'complete'`.\n\n" +
+	"CLARIFICATIONS: if the question is ambiguous, this returns `status: 'needs_clarification'` " +
+	'with a `clarification.question` (and optional `clarification.options`). Relay the question to the user, ' +
+	'then call `ask_nao` again with the SAME `chatId` and their answer as `question`.';
+
+const ASK_NAO_DATA_MODE_DESCRIPTION = ASK_NAO_DESCRIPTION + CHART_DATA_MODE_ASK_NAO_ADDENDUM;
+
+const ASK_NAO_STORY_RESTRICTED_DESCRIPTION =
+	'Default tool for analytics questions, chart requests, and updates to existing Stories. ' +
+	"Delegates the full reasoning loop to nao's sub-agent — it reads project rules/context, writes SQL, and builds charts. " +
+	'The conversation is persisted as a chat visible in the nao UI. New Story creation is unavailable for this user, but existing Stories can still be updated.\n\n' +
+	'USE WHEN: the user asks an analytics question, wants a chart, or wants to update an existing Story. Default to this tool; use `execute_sql` / `display_chart` / `update_story` only when you need step-by-step control.\n\n' +
+	"LONG RUNS: if this returns `status: 'running'`, poll `get_nao_answer` with the returned `chatId` every few seconds until complete.\n\n" +
+	"CLARIFICATIONS: if this returns `status: 'needs_clarification'`, relay its question to the user, then call `ask_nao` again with the same `chatId` and their answer.";
 
 const GET_NAO_ANSWER_DESCRIPTION =
 	'Fetch the result of an `ask_nao` run that is still in progress. ' +
@@ -63,11 +78,27 @@ const ASK_NAO_QUERIES_SCHEMA = z
 			'Forward `id` to `display_chart` as `query_id`; pick `x_axis_key` / `series[].data_key` from `columns`.',
 	);
 
+const ASK_NAO_CLARIFICATION_SCHEMA = z
+	.object({
+		question: z.string(),
+		options: z.array(z.string()).optional(),
+	})
+	.optional()
+	.describe(
+		'Present when `status` is `needs_clarification`: the question nao needs answered, with optional one-click answer choices.',
+	);
+
 export function registerSubAgentTools(server: McpServer, ctx: McpContext): void {
+	const askNaoDescription = ctx.storyCreationEnabled
+		? ctx.chartDataMode
+			? ASK_NAO_DATA_MODE_DESCRIPTION
+			: ASK_NAO_DESCRIPTION
+		: ASK_NAO_STORY_RESTRICTED_DESCRIPTION + (ctx.chartDataMode ? CHART_DATA_MODE_ASK_NAO_ADDENDUM : '');
+
 	registerMcpTool(server, ctx, {
 		name: 'ask_nao',
 		title: 'Ask Nao',
-		description: ASK_NAO_DESCRIPTION,
+		description: askNaoDescription,
 		inputSchema: {
 			question: z
 				.string()
@@ -86,16 +117,22 @@ export function registerSubAgentTools(server: McpServer, ctx: McpContext): void 
 		},
 		outputSchema: {
 			status: z
-				.enum(['running', 'complete'])
-				.describe('`complete` carries the answer; `running` means poll `get_nao_answer` with `chatId`.'),
+				.enum(['running', 'complete', 'needs_clarification'])
+				.describe(
+					'`complete` carries the answer; `running` means poll `get_nao_answer` with `chatId`; ' +
+						'`needs_clarification` means nao asked a clarifying question — relay it to the user, ' +
+						"then call `ask_nao` again with the same `chatId` and the user's answer.",
+				),
 			chatId: z
 				.string()
 				.describe(
-					'UUID of the chat that holds this run. Pass to `get_nao_answer` to poll, or to ' +
-						'`create_story` / `update_story` to attach further work.',
+					ctx.storyCreationEnabled
+						? 'UUID of the chat that holds this run. Pass to `get_nao_answer` to poll, or to `create_story` / `update_story` to attach further work.'
+						: 'UUID of the chat that holds this run. Pass it to `get_nao_answer` to poll or continue the conversation.',
 				),
 			chatUrl: z.url().describe('URL to open the chat in the nao UI.'),
 			text: z.string().describe('The assistant final text response. Empty while `status` is `running`.'),
+			clarification: ASK_NAO_CLARIFICATION_SCHEMA,
 			queries: ASK_NAO_QUERIES_SCHEMA,
 			story_ids: z
 				.array(z.string())
@@ -111,7 +148,9 @@ export function registerSubAgentTools(server: McpServer, ctx: McpContext): void 
 			const { chat, uiMessages } = await buildChatContext(ctx.projectId, ctx.userId, question, chatId);
 			const naoChatUrl = chatUrl(chat.id);
 
-			const agent = await agentService.create(chat);
+			const agent = await agentService.create(chat, undefined, {
+				tools: defaultAgentToolsExcluding(MCP_SUB_AGENT_EXCLUDED_TOOLS),
+			});
 			askNaoRuns.start(chat.id);
 			const runPromise = runAskNaoInBackground(agent, uiMessages, chat.id, naoChatUrl);
 
@@ -120,7 +159,7 @@ export function registerSubAgentTools(server: McpServer, ctx: McpContext): void 
 				throw new Error(outcome.error);
 			}
 			if (outcome.kind === 'complete') {
-				return answerCompletePayload(outcome.result);
+				return answerCompletePayload(outcome.result, ctx);
 			}
 			return runningPayload(chat.id, naoChatUrl);
 		},
@@ -134,10 +173,11 @@ export function registerSubAgentTools(server: McpServer, ctx: McpContext): void 
 			chatId: z.uuid().describe("UUID returned by an `ask_nao` call that responded with `status: 'running'`."),
 		},
 		outputSchema: {
-			status: z.enum(['running', 'complete', 'error']),
+			status: z.enum(['running', 'complete', 'needs_clarification', 'error']),
 			chatId: z.string(),
 			chatUrl: z.url(),
 			text: z.string().describe('The assistant final text response. Empty unless `status` is `complete`.'),
+			clarification: ASK_NAO_CLARIFICATION_SCHEMA,
 			queries: ASK_NAO_QUERIES_SCHEMA,
 			story_ids: z.array(z.string()),
 			error: z.string().optional().describe('Failure reason when `status` is `error`.'),
@@ -145,7 +185,7 @@ export function registerSubAgentTools(server: McpServer, ctx: McpContext): void 
 		errorMessage: () => 'Failed to fetch the nao answer.',
 		handler: async ({ chatId }) => {
 			await assertChatAccess(ctx, chatId);
-			return resolveAnswerPayload(chatId);
+			return resolveAnswerPayload(chatId, ctx);
 		},
 	});
 }
@@ -161,11 +201,15 @@ async function runAskNaoInBackground(
 	naoChatUrl: string,
 ): Promise<AskNaoResult> {
 	try {
-		const text = await drainStream(agent.stream(uiMessages));
+		let answer = await drainStream(agent.stream(uiMessages));
+		if (!answer.text && !answer.clarification) {
+			answer = await extractAnswerFromChat(chatId);
+		}
 		const result: AskNaoResult = {
 			chatId,
 			chatUrl: naoChatUrl,
-			text,
+			text: answer.text,
+			...(answer.clarification ? { clarification: answer.clarification } : {}),
 			queries: agent.queryResultsSummary,
 			story_ids: await resolveStoryIds(agent.generatedArtifacts.stories, chatId),
 		};
@@ -196,13 +240,13 @@ async function waitForResultOrBudget(runPromise: Promise<AskNaoResult>, budgetMs
 	}
 }
 
-async function resolveAnswerPayload(chatId: string): Promise<ToolResult> {
+async function resolveAnswerPayload(chatId: string, ctx: McpContext): Promise<ToolResult> {
 	const state = askNaoRuns.get(chatId);
 	if (!state) {
-		return reconstructAnswerFromDb(chatId);
+		return reconstructAnswerFromDb(chatId, ctx);
 	}
 	if (state.status === 'complete') {
-		return answerCompletePayload(state.result);
+		return answerCompletePayload(state.result, ctx);
 	}
 	if (state.status === 'error') {
 		return answerErrorPayload(chatId, state.error);
@@ -215,16 +259,25 @@ async function resolveAnswerPayload(chatId: string): Promise<ToolResult> {
  * restart): rebuild the final answer from the persisted chat. Query/story metadata is
  * not reconstructed since it only lives on the in-memory run.
  */
-async function reconstructAnswerFromDb(chatId: string): Promise<ToolResult> {
+async function reconstructAnswerFromDb(chatId: string, ctx: McpContext): Promise<ToolResult> {
+	const answer = await extractAnswerFromChat(chatId);
+	return answerCompletePayload(
+		{
+			chatId,
+			chatUrl: chatUrl(chatId),
+			text: answer.text,
+			...(answer.clarification ? { clarification: answer.clarification } : {}),
+			queries: [],
+			story_ids: [],
+		},
+		ctx,
+	);
+}
+
+async function extractAnswerFromChat(chatId: string): Promise<AskNaoAnswer> {
 	const messages = await chatQueries.getChatMessages(chatId);
 	const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant') ?? null;
-	return answerCompletePayload({
-		chatId,
-		chatUrl: chatUrl(chatId),
-		text: extractFinalText(lastAssistant),
-		queries: [],
-		story_ids: [],
-	});
+	return extractAnswer(lastAssistant);
 }
 
 async function assertChatAccess(ctx: McpContext, chatId: string): Promise<void> {
@@ -250,16 +303,56 @@ function runningPayload(chatId: string, naoChatUrl: string): ToolResult {
 	};
 }
 
-function answerCompletePayload(result: AskNaoResult): ToolResult {
+function answerCompletePayload(result: AskNaoResult, ctx: McpContext): ToolResult {
+	if (result.clarification) {
+		return clarificationPayload(result, result.clarification);
+	}
+
+	const content: ToolResult['content'] = [
+		{
+			type: 'text' as const,
+			text: `${result.text}\n\n[chatId: ${result.chatId}]\n[chatUrl: ${result.chatUrl}]`,
+		},
+		{ type: 'text' as const, text: JSON.stringify({ queries: result.queries, story_ids: result.story_ids }) },
+	];
+	if (ctx.chartDataMode && result.queries.length > 0 && result.story_ids.length === 0) {
+		content.push({ type: 'text' as const, text: CHART_DATA_MODE_RESULT_NUDGE });
+	}
+
+	return {
+		content,
+		structuredContent: { status: 'complete', ...result },
+	};
+}
+
+function clarificationPayload(result: AskNaoResult, clarification: AskNaoClarification): ToolResult {
+	const optionsText = clarification.options?.length
+		? `\nSuggested answers:\n${clarification.options.map((option) => `- ${option}`).join('\n')}`
+		: '';
+	const structuredClarification = {
+		question: clarification.question,
+		...(clarification.options?.length ? { options: clarification.options } : {}),
+	};
+
 	return {
 		content: [
 			{
 				type: 'text' as const,
-				text: `${result.text}\n\n[chatId: ${result.chatId}]\n[chatUrl: ${result.chatUrl}]`,
+				text:
+					`nao needs clarification before it can answer: "${clarification.question}"` +
+					optionsText +
+					`\nAsk the user, then call ask_nao again with the SAME chatId (${result.chatId}) and the user's answer as the question.`,
 			},
-			{ type: 'text' as const, text: JSON.stringify({ queries: result.queries, story_ids: result.story_ids }) },
 		],
-		structuredContent: { status: 'complete', ...result },
+		structuredContent: {
+			status: 'needs_clarification',
+			chatId: result.chatId,
+			chatUrl: result.chatUrl,
+			text: result.text,
+			clarification: structuredClarification,
+			queries: result.queries,
+			story_ids: result.story_ids,
+		},
 	};
 }
 
@@ -343,15 +436,44 @@ async function buildChatContext(
 	};
 }
 
-async function drainStream(stream: ReadableStream<InferUIMessageChunk<UIMessage>>): Promise<string> {
+type AskNaoAnswer = { text: string; clarification?: AskNaoClarification };
+
+async function drainStream(stream: ReadableStream<InferUIMessageChunk<UIMessage>>): Promise<AskNaoAnswer> {
 	let lastMessage: UIMessage | null = null;
 	for await (const message of readUIMessageStream<UIMessage>({ stream })) {
 		lastMessage = message;
 	}
-	return extractFinalText(lastMessage);
+	return extractAnswer(lastMessage);
 }
 
-function extractFinalText(message: UIMessage | null): string {
+/** Splits an assistant message into its final text and any pending clarification question. */
+export function extractAnswer(message: UIMessage | null): AskNaoAnswer {
+	const clarification = extractClarification(message);
+	return {
+		text: extractFinalText(message),
+		...(clarification ? { clarification } : {}),
+	};
+}
+
+export function extractClarification(message: UIMessage | null): AskNaoClarification | undefined {
+	if (!message) {
+		return undefined;
+	}
+	const part = message.parts.find((part) => isToolUIPart(part) && getToolName(part) === 'clarification');
+	if (!part) {
+		return undefined;
+	}
+	const toolPart = part as { input?: unknown; rawInput?: unknown };
+	const input = firstRecord(toolPart.input, toolPart.rawInput);
+	if (!input || typeof input.question !== 'string' || input.question.trim().length === 0) {
+		return undefined;
+	}
+
+	const options = extractClarificationOptions(input);
+	return options ? { question: input.question, options } : { question: input.question };
+}
+
+export function extractFinalText(message: UIMessage | null): string {
 	if (!message) {
 		return '';
 	}
@@ -359,4 +481,23 @@ function extractFinalText(message: UIMessage | null): string {
 		.filter((p): p is Extract<UIMessagePart, { type: 'text' }> => p.type === 'text')
 		.map((p) => p.text)
 		.join('\n\n');
+}
+
+function extractClarificationOptions(input: Record<string, unknown>): string[] | undefined {
+	const options = input.options;
+	if (!Array.isArray(options) || options.length === 0) {
+		return undefined;
+	}
+	if (!options.every((option): option is string => typeof option === 'string')) {
+		return undefined;
+	}
+	return options;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null;
+}
+
+function firstRecord(...values: unknown[]): Record<string, unknown> | undefined {
+	return values.find((value): value is Record<string, unknown> => isRecord(value));
 }

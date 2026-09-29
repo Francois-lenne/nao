@@ -28,15 +28,25 @@ from nao_core.config.databases import (  # noqa: E402
     BigQueryConfig,
     DatabricksConfig,
     DuckDBConfig,
+    DuckLakeConfig,
+    MotherDuckConfig,
     MssqlConfig,
     PostgresConfig,
     RedshiftConfig,
     SnowflakeConfig,
     TrinoConfig,
 )
-from nao_core.config.databases.base import DatabaseAccessor, DatabaseConfig  # noqa: E402
+from nao_core.config.databases.base import (  # noqa: E402
+    DatabaseAccessor,
+    DatabaseConfig,
+)
 from nao_core.config.databases.redshift import RedshiftSSHTunnelConfig  # noqa: E402
-from nao_core.config.llm import DEFAULT_ANNOTATION_MODELS, LLMConfig, LLMProvider  # noqa: E402
+from nao_core.config.llm import (  # noqa: E402
+    DEFAULT_ANNOTATION_MODELS,
+    LLMConfig,
+    LLMProvider,
+)
+from nao_core.config.confluence import ConfluenceConfig  # noqa: E402
 from nao_core.config.mcp import McpConfig  # noqa: E402
 from nao_core.config.notion import NotionConfig  # noqa: E402
 from nao_core.config.obsidian import ObsidianConfig  # noqa: E402
@@ -155,6 +165,8 @@ DATABASE_CONFIGS: list[tuple[str, str, type[DatabaseConfig]]] = [
     ("Snowflake", "snowflake", SnowflakeConfig),
     ("BigQuery", "bigquery", BigQueryConfig),
     ("DuckDB", "duckdb", DuckDBConfig),
+    ("DuckLake", "ducklake", DuckLakeConfig),
+    ("MotherDuck", "motherduck", MotherDuckConfig),
     ("Databricks", "databricks", DatabricksConfig),
     ("Microsoft SQL Server", "mssql", MssqlConfig),
     ("Amazon Redshift", "redshift", RedshiftConfig),
@@ -162,7 +174,14 @@ DATABASE_CONFIGS: list[tuple[str, str, type[DatabaseConfig]]] = [
     ("Amazon Athena", "athena", AthenaConfig),
 ]
 
-BASE_DB_FIELDS = {"type", "name", "include", "exclude", "accessors"}
+BASE_DB_FIELDS = {
+    "type",
+    "name",
+    "include",
+    "exclude",
+    "allow_listed_only",
+    "accessors",
+}
 
 
 def _section_databases() -> str:
@@ -234,6 +253,14 @@ def _section_notion() -> str:
     parts: list[str] = []
     parts.append("## Notion\n")
     parts.append(_fields_table(NotionConfig))
+    parts.append("")
+    return "\n".join(parts)
+
+
+def _section_confluence() -> str:
+    parts: list[str] = []
+    parts.append("## Confluence\n")
+    parts.append(_fields_table(ConfluenceConfig))
     parts.append("")
     return "\n".join(parts)
 
@@ -314,8 +341,23 @@ notion:
   pages:
     - https://notion.so/my-page-id
 
+confluence:
+  base_url: ${{ env('CONFLUENCE_BASE_URL') }}
+  deployment: cloud
+  email: ${{ env('CONFLUENCE_EMAIL') }}
+  api_token: ${{ env('CONFLUENCE_API_TOKEN') }}
+  pages:
+    - https://acme.atlassian.net/wiki/spaces/ENG/pages/123456/Runbook
+  page_trees:
+    - 123456
+  labels:
+    - data-catalog
+    - DATA:glossary
+  spaces:
+    - DATA
+
 obsidian:
-  path: /Users/me/Documents/Knowledge
+  path: ~/Documents/Knowledge
 
 slack:
   bot_token: ${{ env('SLACK_BOT_TOKEN') }}
@@ -353,6 +395,7 @@ def generate_markdown() -> str:
                 "databases": "[DatabaseConfig[]](#databases)",
                 "repos": "[RepoConfig[]](#repos)",
                 "notion": "[NotionConfig](#notion)",
+                "confluence": "[ConfluenceConfig](#confluence)",
                 "obsidian": "[ObsidianConfig](#obsidian)",
                 "llm": "[LLMConfig](#llm)",
                 "slack": "[SlackConfig](#slack)",
@@ -367,6 +410,7 @@ def generate_markdown() -> str:
     parts.append(_section_llm())
     parts.append(_section_repos())
     parts.append(_section_notion())
+    parts.append(_section_confluence())
     parts.append(_section_obsidian())
     parts.append(_section_slack())
     parts.append(_section_mcp())

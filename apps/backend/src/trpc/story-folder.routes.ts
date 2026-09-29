@@ -1,8 +1,10 @@
+import { BULK_ITEMS_LIMIT } from '@nao/shared';
 import type { UserRole } from '@nao/shared/types';
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod/v4';
 
 import type { DBStoryFolder } from '../db/abstractSchema';
+import { db } from '../db/db';
 import * as storyQueries from '../queries/story.queries';
 import * as storyFolderQueries from '../queries/story-folder.queries';
 import { canSendProcedure, projectProtectedProcedure } from './trpc';
@@ -127,6 +129,36 @@ export const storyFolderRoutes = {
 		await storyFolderQueries.unarchiveFolder(ctx.user.id, ctx.project.id, input.id);
 	}),
 
+	bulkArchive: canSendProcedure
+		.input(z.object({ ids: z.array(z.string()).min(1).max(BULK_ITEMS_LIMIT) }))
+		.mutation(async ({ input, ctx }) => {
+			for (const id of input.ids) {
+				const folder = await assertFolderInProject(id, ctx);
+				assertCanReadPrivateFolder(folder, ctx.user.id);
+				assertCanModifyFolder(folder, ctx.user.id, ctx.userRole);
+			}
+			await db.transaction(async (tx) => {
+				for (const id of input.ids) {
+					await storyFolderQueries.archiveFolder(id, tx);
+				}
+			});
+		}),
+
+	bulkUnarchive: canSendProcedure
+		.input(z.object({ ids: z.array(z.string()).min(1).max(BULK_ITEMS_LIMIT) }))
+		.mutation(async ({ input, ctx }) => {
+			for (const id of input.ids) {
+				const folder = await assertFolderInProject(id, ctx);
+				assertCanReadPrivateFolder(folder, ctx.user.id);
+				assertCanModifyFolder(folder, ctx.user.id, ctx.userRole);
+			}
+			await db.transaction(async (tx) => {
+				for (const id of input.ids) {
+					await storyFolderQueries.unarchiveFolder(ctx.user.id, ctx.project.id, id, tx);
+				}
+			});
+		}),
+
 	move: canSendProcedure
 		.input(z.object({ id: z.string(), newParentId: z.string().nullable() }))
 		.mutation(async ({ input, ctx }) => {
@@ -141,7 +173,6 @@ export const storyFolderRoutes = {
 			}
 			assertCanPlaceInDestination(target, ctx.user.id);
 			assertCanChangeFolderScope(folder, target, ctx.user.id);
-
 			try {
 				await storyFolderQueries.moveFolder(ctx.user.id, ctx.project.id, input.id, input.newParentId);
 			} catch (err) {
@@ -179,7 +210,6 @@ export const storyFolderRoutes = {
 			}
 
 			assertCanPlaceInDestination(target, ctx.user.id);
-
 			await storyFolderQueries.moveStoryToFolder(input.storyId, input.folderId, {
 				storyOwnerId,
 				projectId: ctx.project.id,

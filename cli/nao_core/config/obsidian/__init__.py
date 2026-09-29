@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field
 
 from nao_core.ui import UI, ask_text
 
+OBSIDIAN_OUTPUT_DIR = "docs/obsidian"
+
 
 class ObsidianConfig(BaseModel):
     """Obsidian configuration."""

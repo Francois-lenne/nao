@@ -1,16 +1,15 @@
+import shutil
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 from rich.console import Console
 
 from nao_core.config.base import NaoConfig
-from nao_core.config.obsidian import ObsidianConfig
-from nao_core.obsidian import OBSIDIAN_OUTPUT_DIR
+from nao_core.config.obsidian import OBSIDIAN_OUTPUT_DIR, ObsidianConfig
 
 from ..base import SyncProvider, SyncResult
 
 console = Console()
-
-IGNORED_DIR_NAMES = {".obsidian"}
 
 
 def cleanup_stale_notes(synced_files: set[str], output_path: Path, verbose: bool = False) -> int:
@@ -28,19 +27,22 @@ def cleanup_stale_notes(synced_files: set[str], output_path: Path, verbose: bool
                 console.print(f"  [dim red]removing stale note:[/dim red] {relative}")
 
     for dir_path in sorted((p for p in output_path.rglob("*") if p.is_dir()), reverse=True):
-        if dir_path != output_path:
-            try:
-                dir_path.rmdir()
-            except OSError:
-                pass
+        try:
+            dir_path.rmdir()
+        except OSError:
+            pass
 
     return removed_count
 
 
-def iter_markdown_files(vault_path: Path):
-    """Yield markdown files from the vault, skipping Obsidian metadata directories."""
+def iter_markdown_files(vault_path: Path, output_path: Path) -> Iterator[Path]:
+    """Yield vault markdown files, skipping hidden folders (.obsidian, .trash, .git) and the sync output itself."""
+    resolved_output_path = output_path.resolve()
     for path in vault_path.rglob("*.md"):
-        if any(part in IGNORED_DIR_NAMES for part in path.parts):
+        relative_path = path.relative_to(vault_path)
+        if any(part.startswith(".") for part in relative_path.parts):
+            continue
+        if path.resolve().is_relative_to(resolved_output_path):
             continue
         if not path.is_file():
             continue
@@ -75,41 +77,37 @@ class ObsidianSyncProvider(SyncProvider):
     ) -> SyncResult:
         if not items:
             console.print("\n[dim]No Obsidian vault configured[/dim]")
-            return SyncResult(provider_name=self.name, items_synced=0, summary="No Obsidian configuration configured")
+            return SyncResult(provider_name=self.name, items_synced=0, summary="No Obsidian vault configured")
 
-        obsidian_config = items[0]
-        vault_path = Path(obsidian_config.path).expanduser().resolve()
+        vault_path = Path(items[0].path).expanduser().resolve()
         if not vault_path.exists():
             raise FileNotFoundError(f"Obsidian vault path does not exist: {vault_path}")
         if not vault_path.is_dir():
             raise ValueError(f"Obsidian vault path is not a directory: {vault_path}")
 
         output_path.mkdir(parents=True, exist_ok=True)
-        notes_synced = 0
         synced_files: set[str] = set()
 
         console.print(f"\n[bold cyan]{self.emoji}  Syncing {self.name}[/bold cyan]")
         console.print(f"[dim]Vault:[/dim] {vault_path}")
         console.print(f"[dim]Location:[/dim] {output_path.absolute()}\n")
 
-        for note_path in iter_markdown_files(vault_path):
+        for note_path in iter_markdown_files(vault_path, output_path):
             relative_path = note_path.relative_to(vault_path)
             destination = output_path / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(note_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-            notes_synced += 1
+            shutil.copyfile(note_path, destination)
             synced_files.add(PurePosixPath(relative_path).as_posix())
 
         removed_count = cleanup_stale_notes(synced_files, output_path, verbose=True)
 
-        summary = f"{notes_synced} markdown notes synced"
+        summary = f"{len(synced_files)} markdown notes synced"
         if removed_count > 0:
             summary += f", {removed_count} stale removed"
 
         return SyncResult(
             provider_name=self.name,
-            items_synced=notes_synced,
+            items_synced=len(synced_files),
             details={"removed": removed_count},
             summary=summary,
         )
